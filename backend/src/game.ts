@@ -1,3 +1,6 @@
+import { FastifyBaseLogger } from "fastify";
+import { QuestionService } from "./questions";
+
 type Player = {
   id: string;
   name: string;
@@ -15,20 +18,29 @@ type GameState = {
   gameStatus: GameStatus;
   currentRound: number;
   totalRounds: number;
+  answers: PlayerAnswer[];
   questions: Question[];
   timerDuringRound: number;
   timerBetweenRounds: number;
 };
 
-type Question = {
+export type Question = {
+  id: string;
   question: string;
   answers: Answer[];
   correctAnswer: Answer;
 };
 
-type Answer = {
+type PlayerAnswer = {
+  playerId: string;
+  questionId: string;
+  answerId: string;
+};
+
+export type Answer = {
+  id: string;
+  questionId: string;
   answer: string;
-  isCorrect: boolean;
 };
 
 type GameId = string;
@@ -54,12 +66,13 @@ export class Game {
     return new Game(id, state);
   };
 
-  private static getNewGameState = (players: Player[]) => {
+  private static getNewGameState = (players: Player[]): GameState => {
     return {
       players,
       gameStatus: GameStatus.WAITING_TO_START,
       currentRound: 0,
       totalRounds: 3,
+      answers: [],
       questions: [],
       timerDuringRound: 0,
       timerBetweenRounds: 0,
@@ -143,6 +156,10 @@ export class Game {
     return this.state;
   };
 
+  getState = () => {
+    return this.state;
+  };
+
   startGame = (questions: Question[]) => {
     const { state } = this;
     const updatedState = {
@@ -216,15 +233,37 @@ export class Game {
     const { players } = state;
     return players.length;
   };
+
+  addAnswer = (playerId: PlayerId, answer: PlayerAnswer) => {
+    const { state } = this;
+    const { players } = state;
+    const player = players.find((p) => p.id === playerId);
+
+    if (player) {
+      const updatedState = {
+        ...state,
+        answers: state.answers.concat(answer),
+      };
+      this.state = updatedState;
+    }
+  };
 }
 
 export class GameManager {
   games: Map<string, Game> = new Map();
   callback: (gameId: GameId, message: string) => void;
+  questionService: QuestionService;
+  logger: FastifyBaseLogger;
 
-  constructor(callback: (gameId: GameId, gameStatePayload: string) => void) {
+  constructor(
+    logger: FastifyBaseLogger,
+    callback: (gameId: GameId, gameStatePayload: string) => void,
+    questionService: QuestionService
+  ) {
     this.callback = callback;
     this.updateGamesBasedOntimer();
+    this.questionService = questionService;
+    this.logger = logger;
   }
   private updateAllGames = () => {
     this.games.forEach((game) => {
@@ -232,8 +271,15 @@ export class GameManager {
       if (numberOfPlayers === 0) {
         this.deleteGame(game.id);
       } else {
-        const state = game.runGameUpdateJob();
-        this.callback(game.id, JSON.stringify(state));
+        const currentState = game.getState();
+        const newState = game.runGameUpdateJob();
+
+        if (
+          JSON.stringify(currentState.gameStatus) !==
+          JSON.stringify(newState.gameStatus)
+        ) {
+          this.callback(game.id, JSON.stringify(newState));
+        }
       }
     });
   };
@@ -256,6 +302,7 @@ export class GameManager {
     const game = this.games.get(id);
     if (game) {
       game.addPlayer(player);
+      this.callback(game.id, JSON.stringify(game.getState()));
     }
   };
 
@@ -269,18 +316,30 @@ export class GameManager {
   createNewGame = (id: GameId, players: Player[]) => {
     const game = Game.createGame(id, players);
     this.games.set(game.id, game);
+    this.callback(game.id, JSON.stringify(game.getState()));
     return game;
   };
 
-  startGame = (id: GameId) => {
+  startGame = async (id: GameId) => {
     const game = this.games.get(id);
-    const questions: Question[] = [];
+    const questions = await this.questionService.getQuestions().run();
     const canBeStarted =
       (game && game.state.gameStatus === GameStatus.WAITING_TO_START) ||
       (game && game.state.gameStatus === GameStatus.FINISHED);
 
     if (canBeStarted) {
-      game.startGame(questions);
+      questions.mapLeft(this.logger.error).map(game.startGame);
+    }
+  };
+
+  addAnswerToGame = (
+    gameId: GameId,
+    playerId: PlayerId,
+    answer: PlayerAnswer
+  ) => {
+    const game = this.games.get(gameId);
+    if (game) {
+      game.addAnswer(playerId, answer);
     }
   };
 }

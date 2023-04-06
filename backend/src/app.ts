@@ -2,11 +2,21 @@ import Fastify, { FastifyRequest, FastifyServerOptions } from "fastify";
 import { Config } from "./config";
 import fastifyWebsocket from "@fastify/websocket";
 import { RoomId, SocketController, SocketId, SocketInfo } from "./socket";
-import { Codec, enumeration, Maybe, maybe, optional, string } from "purify-ts";
+import {
+  Codec,
+  enumeration,
+  exactly,
+  Maybe,
+  maybe,
+  oneOf,
+  optional,
+  string,
+} from "purify-ts";
 import { RawData } from "ws";
 import { FastifyBaseLogger } from "fastify";
 import { parseJSON } from "./utils";
 import { GameManager } from "./game";
+import { createQuestionService } from "./questions";
 
 export const app = async (config: Config, opts?: FastifyServerOptions) => {
   const app = Fastify(opts);
@@ -23,7 +33,12 @@ export const app = async (config: Config, opts?: FastifyServerOptions) => {
     socketController.roomBroadcast(gameId, message);
   };
 
-  const gameManager = new GameManager(updatePlayersWithGameState);
+  const questionService = createQuestionService(logger);
+  const gameManager = new GameManager(
+    logger,
+    updatePlayersWithGameState,
+    questionService
+  );
 
   app.get(
     "/game/:id",
@@ -71,10 +86,31 @@ enum MessageType {
   START_GAME = "start-game",
 }
 
-const messageCodec = Codec.interface({
-  type: enumeration(MessageType),
-  payload: maybe(string),
+const answerPayloadCodec = Codec.interface({
+  type: exactly(MessageType.SEND_ANSWER),
+  questionId: string,
+  answerId: string,
 });
+
+const startGamePayloadCodec = Codec.interface({
+  type: exactly(MessageType.START_GAME),
+});
+
+const joinGamePayloadCodec = Codec.interface({
+  type: exactly(MessageType.JOIN_GAME),
+  name: string,
+});
+
+const leaveGamePayloadCodec = Codec.interface({
+  type: exactly(MessageType.LEAVE_GAME),
+});
+
+const messageCodec = oneOf([
+  answerPayloadCodec,
+  startGamePayloadCodec,
+  joinGamePayloadCodec,
+  leaveGamePayloadCodec,
+]);
 
 const messageController =
   (logger: FastifyBaseLogger) =>
@@ -88,24 +124,20 @@ const messageController =
         switch (message.type) {
           case MessageType.JOIN_GAME:
             logger.info("JOIN_GAME");
-            socketController.roomBroadcast(
-              playerInfo.roomId,
-              message.payload.mapOrDefault((payload) => payload, "No payload")
-            );
+            socketController.roomBroadcast(playerInfo.roomId, "Joined game");
             break;
           case MessageType.LEAVE_GAME:
             logger.info("LEAVE_GAME");
-            socketController.roomBroadcast(
-              playerInfo.roomId,
-              message.payload.mapOrDefault((payload) => payload, "No payload")
-            );
+            socketController.roomBroadcast(playerInfo.roomId, "Left game");
             break;
           case MessageType.SEND_ANSWER:
             logger.info("SEND_ANSWER");
-            socketController.roomBroadcast(
-              playerInfo.roomId,
-              message.payload.mapOrDefault((payload) => payload, "No payload")
-            );
+            gameManager.addAnswerToGame(playerInfo.roomId, playerInfo.id, {
+              playerId: playerInfo.id,
+              questionId: message.questionId,
+              answerId: message.answerId,
+            });
+            socketController.roomBroadcast(playerInfo.roomId, "Answer sent");
             break;
           case MessageType.START_GAME:
             logger.info("START_GAME");
